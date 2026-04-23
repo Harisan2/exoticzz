@@ -38,6 +38,10 @@ export default function UploadTest() {
         throw new Error(data.error || text || 'Upload failed')
       }
 
+      if (!data.url) {
+        throw new Error('Upload URL ontbreekt')
+      }
+
       setUploadedUrl(data.url)
     } catch (error) {
       console.error(error)
