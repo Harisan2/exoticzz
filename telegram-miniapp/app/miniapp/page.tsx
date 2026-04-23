@@ -17,12 +17,31 @@ import type {
 
 const STORAGE_KEY = 'telegram-miniapp-state'
 
+type TelegramWindow = Window & {
+  Telegram?: {
+    WebApp?: {
+      ready?: () => void
+      initDataUnsafe?: {
+        user?: {
+          id?: number
+        }
+      }
+    }
+  }
+}
+
 type AppStorage = {
   theme: ThemeSettings
   shopSettings: ShopSettings
   links: LinkItem[]
   categories: Category[]
   announcements: Announcement[]
+}
+
+type AdminAccessState = {
+  isAdminByTelegram: boolean
+  hasPasswordAccess: boolean
+  canAccessAdmin: boolean
 }
 
 const defaultTheme: ThemeSettings = {
@@ -145,9 +164,18 @@ function normalizeStorageData(parsed: Partial<AppStorage>) {
   }
 }
 
-export default function MiniApp() {
-  const isAdmin = true
+function getTelegramUserId() {
+  if (typeof window === 'undefined') {
+    return null
+  }
 
+  const telegramWindow = window as TelegramWindow
+  return telegramWindow.Telegram?.WebApp?.initDataUnsafe?.user?.id
+    ? String(telegramWindow.Telegram?.WebApp?.initDataUnsafe?.user?.id)
+    : null
+}
+
+export default function MiniApp() {
   const [tab, setTab] = useState<Tab>('shop')
   const [profileView, setProfileView] = useState<ProfileView>('menu')
 
@@ -158,6 +186,43 @@ export default function MiniApp() {
   const [announcements, setAnnouncements] = useState<Announcement[]>(defaultAnnouncements)
 
   const [hasLoadedStorage, setHasLoadedStorage] = useState(false)
+  const [telegramUserId, setTelegramUserId] = useState<string | null>(null)
+  const [adminAccess, setAdminAccess] = useState<AdminAccessState>({
+    isAdminByTelegram: false,
+    hasPasswordAccess: false,
+    canAccessAdmin: false,
+  })
+  const [isAdminPromptOpen, setIsAdminPromptOpen] = useState(false)
+  const [adminPasswordInput, setAdminPasswordInput] = useState('')
+  const [adminPasswordError, setAdminPasswordError] = useState('')
+  const [isSubmittingAdminPassword, setIsSubmittingAdminPassword] = useState(false)
+
+  async function refreshAdminAccessStatus(nextTelegramUserId: string | null) {
+    try {
+      const params = new URLSearchParams()
+
+      if (nextTelegramUserId) {
+        params.set('telegramUserId', nextTelegramUserId)
+      }
+
+      const response = await fetch(`/api/admin/access?${params.toString()}`, {
+        cache: 'no-store',
+      })
+
+      const data = (await response.json()) as AdminAccessState
+      setAdminAccess(data)
+      return data
+    } catch (error) {
+      console.error('Fout bij ophalen admin status:', error)
+      return null
+    }
+  }
+
+  useEffect(() => {
+    const detectedTelegramUserId = getTelegramUserId()
+    setTelegramUserId(detectedTelegramUserId)
+    void refreshAdminAccessStatus(detectedTelegramUserId)
+  }, [])
 
   useEffect(() => {
     try {
@@ -199,16 +264,92 @@ export default function MiniApp() {
   }, [theme, shopSettings, links, categories, announcements, hasLoadedStorage])
 
   useEffect(() => {
-    if (!isAdmin && tab === 'profile') {
+    if (!adminAccess.canAccessAdmin && tab === 'profile') {
       setTab('shop')
     }
-  }, [isAdmin, tab])
+  }, [adminAccess.canAccessAdmin, tab])
 
   useEffect(() => {
     if (tab !== 'profile') {
       setProfileView('menu')
     }
   }, [tab])
+
+  function openAdminPrompt() {
+    setAdminPasswordError('')
+    setAdminPasswordInput('')
+    setIsAdminPromptOpen(true)
+  }
+
+  async function handleAdminAccessRequest() {
+    if (adminAccess.canAccessAdmin) {
+      setTab('profile')
+      return
+    }
+
+    openAdminPrompt()
+  }
+
+  async function submitAdminPassword() {
+    try {
+      setIsSubmittingAdminPassword(true)
+      setAdminPasswordError('')
+
+      const response = await fetch('/api/admin/access', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          password: adminPasswordInput,
+          telegramUserId,
+        }),
+      })
+
+      const data = (await response.json()) as
+        | (AdminAccessState & { error?: string })
+        | { error?: string }
+
+      if (!response.ok) {
+        throw new Error('error' in data ? data.error || 'Admin toegang mislukt' : 'Admin toegang mislukt')
+      }
+
+      setAdminAccess({
+        isAdminByTelegram: 'isAdminByTelegram' in data ? data.isAdminByTelegram : false,
+        hasPasswordAccess: 'hasPasswordAccess' in data ? data.hasPasswordAccess : true,
+        canAccessAdmin: 'canAccessAdmin' in data ? data.canAccessAdmin : true,
+      })
+      setIsAdminPromptOpen(false)
+      setAdminPasswordInput('')
+      setTab('profile')
+    } catch (error) {
+      setAdminPasswordError(error instanceof Error ? error.message : 'Admin toegang mislukt')
+    } finally {
+      setIsSubmittingAdminPassword(false)
+    }
+  }
+
+  async function logoutPasswordAccess() {
+    try {
+      const params = new URLSearchParams()
+
+      if (telegramUserId) {
+        params.set('telegramUserId', telegramUserId)
+      }
+
+      await fetch(`/api/admin/access?${params.toString()}`, {
+        method: 'DELETE',
+      })
+
+      const nextState = await refreshAdminAccessStatus(telegramUserId)
+
+      if (!nextState?.canAccessAdmin) {
+        setTab('shop')
+      }
+    } catch (error) {
+      console.error('Fout bij uitloggen admin toegang:', error)
+    }
+  }
 
   function resetAppData() {
     const confirmed = window.confirm('Weet je zeker dat je alle opgeslagen app-data wilt resetten?')
@@ -264,11 +405,11 @@ export default function MiniApp() {
           announcements={announcements}
           shopSettings={shopSettings}
           theme={theme}
-          isAdmin={isAdmin}
+          isAdmin={adminAccess.canAccessAdmin}
         />
       )}
 
-      {tab === 'profile' && isAdmin && (
+      {tab === 'profile' && adminAccess.canAccessAdmin && (
         <>
           <ProfileTab
             view={profileView}
@@ -290,6 +431,9 @@ export default function MiniApp() {
               style={{
                 maxWidth: 520,
                 margin: '12px auto 0 auto',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 10,
               }}
             >
               <button
@@ -307,15 +451,151 @@ export default function MiniApp() {
               >
                 Reset App Data
               </button>
+
+              {adminAccess.hasPasswordAccess && !adminAccess.isAdminByTelegram && (
+                <button
+                  onClick={logoutPasswordAccess}
+                  style={{
+                    width: '100%',
+                    background: 'transparent',
+                    color: theme.mutedTextColor,
+                    border: `1px solid ${theme.cardBorderColor}`,
+                    borderRadius: 16,
+                    padding: 14,
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Vergrendel Admin Toegang
+                </button>
+              )}
             </div>
           )}
         </>
       )}
 
+      {isAdminPromptOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.62)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 20,
+            zIndex: 50,
+          }}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 420,
+              background: theme.cardColor,
+              border: `1px solid ${theme.cardBorderColor}`,
+              borderRadius: 20,
+              padding: 20,
+              boxShadow: '0 20px 80px rgba(0,0,0,0.35)',
+            }}
+          >
+            <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>
+              Admin Toegang
+            </div>
+
+            <div
+              style={{
+                color: theme.mutedTextColor,
+                fontSize: 14,
+                lineHeight: 1.45,
+                marginBottom: 14,
+              }}
+            >
+              Deze sectie is beveiligd. Voer het admin wachtwoord in om de profile-tab te openen.
+            </div>
+
+            <input
+              type="password"
+              value={adminPasswordInput}
+              onChange={(e) => setAdminPasswordInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  void submitAdminPassword()
+                }
+              }}
+              placeholder="Admin wachtwoord"
+              style={{
+                width: '100%',
+                background: '#0f0f0f',
+                color: theme.textColor,
+                border: `1px solid ${theme.cardBorderColor}`,
+                borderRadius: 14,
+                padding: '14px 16px',
+                fontSize: 16,
+                outline: 'none',
+                marginBottom: 12,
+              }}
+            />
+
+            {adminPasswordError && (
+              <div
+                style={{
+                  color: '#ff8c8c',
+                  fontSize: 13,
+                  marginBottom: 12,
+                }}
+              >
+                {adminPasswordError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={() => {
+                  setIsAdminPromptOpen(false)
+                  setAdminPasswordError('')
+                  setAdminPasswordInput('')
+                }}
+                style={{
+                  flex: 1,
+                  background: 'transparent',
+                  color: theme.mutedTextColor,
+                  border: `1px solid ${theme.cardBorderColor}`,
+                  borderRadius: 14,
+                  padding: '13px 16px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={() => void submitAdminPassword()}
+                disabled={!adminPasswordInput.trim() || isSubmittingAdminPassword}
+                style={{
+                  flex: 1,
+                  background: theme.accentColor,
+                  color: theme.accentTextColor,
+                  border: 'none',
+                  borderRadius: 14,
+                  padding: '13px 16px',
+                  fontWeight: 700,
+                  cursor: !adminPasswordInput.trim() || isSubmittingAdminPassword ? 'not-allowed' : 'pointer',
+                  opacity: !adminPasswordInput.trim() || isSubmittingAdminPassword ? 0.6 : 1,
+                }}
+              >
+                {isSubmittingAdminPassword ? 'Controleren...' : 'Open Profile'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <BottomNav
         current={tab}
         setTab={setTab}
-        isAdmin={isAdmin}
+        canAccessAdmin={adminAccess.canAccessAdmin}
+        onRequestAdminAccess={() => void handleAdminAccessRequest()}
         theme={theme}
       />
     </div>

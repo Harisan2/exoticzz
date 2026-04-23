@@ -5,12 +5,14 @@ import type { Tab, ThemeSettings } from '@/types/app'
 export default function BottomNav({
   current,
   setTab,
-  isAdmin,
+  canAccessAdmin,
+  onRequestAdminAccess,
   theme,
 }: {
   current: Tab
   setTab: (tab: Tab) => void
-  isAdmin: boolean
+  canAccessAdmin: boolean
+  onRequestAdminAccess: () => void
   theme: ThemeSettings
 }) {
   return (
@@ -54,7 +56,7 @@ export default function BottomNav({
         Shop
       </button>
 
-      {isAdmin && (
+      {canAccessAdmin ? (
         <button
           onClick={() => setTab('profile')}
           style={{
@@ -66,6 +68,19 @@ export default function BottomNav({
           }}
         >
           Profile
+        </button>
+      ) : (
+        <button
+          onClick={onRequestAdminAccess}
+          style={{
+            background: 'transparent',
+            color: theme.mutedTextColor,
+            border: 'none',
+            fontWeight: 'normal',
+            cursor: 'pointer',
+          }}
+        >
+          Admin
         </button>
       )}
     </div>
